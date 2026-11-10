@@ -11,7 +11,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # 💡 [중요] 아래 채널 ID와 봇 토큰을 본인 것으로 꼭 바꿔주세요!
 CHANNEL_ID = 1566416489270087843  # 노래를 받을 디스코드 채널 ID
-BOT_TOKEN = "MTU2OTY3NjE2NjM1OTY4NzI4OA.Gt0fct.Pnm41z6_02vTH_1K7I-vD6ojsX0ac3HsclA_aE"  # 디스코드 개발자 센터에서 복사한 봇 토큰
+BOT_TOKEN =   # 디스코드 개발자 센터에서 복사한 봇 토큰
 
 def load_songs():
     with open("songs.json", "r", encoding="utf-8") as f:
@@ -86,4 +86,4 @@ async def recommend_song(ctx):
     embed.add_field(name="YouTube 링크", value=song['url'], inline=False)
     await ctx.send(embed=embed)
 
-bot.run("MTU2OTY3NjE2NjM1OTY4NzI4OA.Gt0fct.Pnm41z6_02vTH_1K7I-vD6ojsX0ac3HsclA_aE")
+bot.run(BOT_TOKEN)
