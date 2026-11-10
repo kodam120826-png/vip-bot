@@ -11,8 +11,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # 💡 [중요] 아래 채널 ID와 봇 토큰을 본인 것으로 꼭 바꿔주세요!
 CHANNEL_ID = 1566416489270087843  # 노래를 받을 디스코드 채널 ID
-BOT_TOKEN =   # 디스코드 개발자 센터에서 복사한 봇 토큰
-
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 def load_songs():
     with open("songs.json", "r", encoding="utf-8") as f:
         return json.load(f)
