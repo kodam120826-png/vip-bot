@@ -1,0 +1,4 @@
+Plaintext
+discord.py
+python-dotenv
+tzdata
