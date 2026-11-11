@@ -3,8 +3,26 @@ import json
 import random
 import datetime
 from zoneinfo import ZoneInfo
+from threading import Thread
+from flask import Flask
 import discord
 from discord.ext import commands, tasks
+
+# 1. 렌더 포트 에러 방지용 가벼운 웹 서버 설정 (Flask)
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "VIP Bot is alive and running!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.start()
+
+# ----------------- 디스코드 봇 설정 -----------------
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -32,7 +50,7 @@ def save_history(history):
 async def on_ready():
     print(f"로그인 완료: {bot.user.name}")
     
-    # 디스코드 서버에 슬래시 명령어 목록 동기화
+    # 슬래시 명령어 목록 동기화
     try:
         synced = await bot.tree.sync()
         print(f"슬래시 명령어 {len(synced)}개 동기화 완료")
@@ -44,7 +62,6 @@ async def on_ready():
 
 # ----------------- 🎵 빅뱅 팬덤 맞춤 슬래시 명령어 -----------------
 
-# 1. 오늘의 빅뱅 추천곡 수동 호출
 @bot.tree.command(name="오늘의추천", description="오늘의 빅뱅 추천곡을 수동으로 뽑습니다!")
 async def slash_recommend_song(interaction: discord.Interaction):
     songs = load_songs()
@@ -68,7 +85,6 @@ async def slash_recommend_song(interaction: discord.Interaction):
     embed.add_field(name="YouTube 링크", value=song['url'], inline=False)
     await interaction.response.send_message(embed=embed)
 
-# 2. 빅뱅/지드래곤 레전드 명언 & 명대사 뽑기
 @bot.tree.command(name="명언", description="빅뱅 & 지드래곤의 레전드 명언과 명대사를 소환합니다.")
 async def slash_quotes(interaction: discord.Interaction):
     quotes = [
@@ -88,7 +104,6 @@ async def slash_quotes(interaction: discord.Interaction):
     embed.set_footer(text="BIGBANG IS V.I.P")
     await interaction.response.send_message(embed=embed)
 
-# 3. 유저 제재 기록 남기기
 @bot.tree.command(name="제재", description="규칙을 위반한 유저에 대한 제재 기록을 남깁니다.")
 async def slash_sanction(interaction: discord.Interaction, member: discord.Member, reason: str):
     embed = discord.Embed(
@@ -102,7 +117,6 @@ async def slash_sanction(interaction: discord.Interaction, member: discord.Membe
     
     await interaction.response.send_message(embed=embed)
 
-# 4. 공지사항 / 원하는 글자 임베드 박스 전송
 @bot.tree.command(name="말하기", description="입력한 내용을 깔끔한 임베드 박스로 대신 전송합니다.")
 async def slash_say(interaction: discord.Interaction, message: str):
     embed = discord.Embed(
@@ -145,4 +159,7 @@ async def daily_bigbang_song():
 async def before_daily_song():
     await bot.wait_until_ready()
 
-bot.run(BOT_TOKEN)
+# 3. 프로그램 실행 시 웹 서버와 봇을 함께 구동
+if __name__ == "__main__":
+    keep_alive()
+    bot.run(BOT_TOKEN)
