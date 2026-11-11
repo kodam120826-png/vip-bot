@@ -89,3 +89,41 @@ async def recommend_song(ctx):
     await ctx.send(embed=embed)
 
 bot.run(BOT_TOKEN)
+
+@bot.event
+async def on_ready():
+    print(f"로그인 완료: {bot.user.name}")
+    # 슬래시 명령어(Slash Commands)를 디스코드 서버에 동기화합니다.
+    try:
+        synced = await bot.tree.sync()
+        print(f"슬래시 명령어 {len(synced)}개 동기화 완료")
+    except Exception as e:
+        print(e)
+        
+    if not daily_bigbang_song.is_running():
+        daily_bigbang_song.start()
+
+# 1. 제재 기록 남기기 슬래시 명령어 (/제재)
+@bot.tree.command(name="제재", description="유저에 대한 제재 기록을 남깁니다.")
+async def sanction(interaction: discord.Interaction, member: discord.Member, reason: str):
+    embed = discord.Embed(
+        title="🚨 유저 제재 기록",
+        description=f"관리자에 의해 제재가 처리되었습니다.",
+        color=0xFF0000
+    )
+    embed.add_field(name="대상 유저", value=member.mention, inline=True)
+    embed.add_field(name="사유", value=reason, inline=True)
+    embed.set_footer(text=f"처리 관리자: {interaction.user.name}")
+    
+    await interaction.response.send_message(embed=embed)
+
+# 2. 원하는 글자를 박스(임베드)로 보내기 슬래시 명령어 (/말하기)
+@bot.tree.command(name="말하기", description="입력한 내용을 예쁜 박스(임베드)로 대신 보냅니다.")
+async def say_embed(interaction: discord.Interaction, message: str):
+    embed = discord.Embed(
+        description=message,
+        color=0x00FF00
+    )
+    embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    
+    await interaction.response.send_message(embed=embed)
