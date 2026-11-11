@@ -31,9 +31,89 @@ def save_history(history):
 @bot.event
 async def on_ready():
     print(f"로그인 완료: {bot.user.name}")
-    # 💡 태스크가 이미 실행 중이 아닐 때만 안전하게 시작하도록 수정
+    
+    # 디스코드 서버에 슬래시 명령어 목록 동기화
+    try:
+        synced = await bot.tree.sync()
+        print(f"슬래시 명령어 {len(synced)}개 동기화 완료")
+    except Exception as e:
+        print(f"동기화 에러: {e}")
+        
     if not daily_bigbang_song.is_running():
         daily_bigbang_song.start()
+
+# ----------------- 🎵 빅뱅 팬덤 맞춤 슬래시 명령어 -----------------
+
+# 1. 오늘의 빅뱅 추천곡 수동 호출
+@bot.tree.command(name="오늘의추천", description="오늘의 빅뱅 추천곡을 수동으로 뽑습니다!")
+async def slash_recommend_song(interaction: discord.Interaction):
+    songs = load_songs()
+    history = load_history()
+    available_songs = [s for s in songs if s['title'] not in history]
+    
+    if not available_songs:
+        history = []
+        available_songs = songs
+        await interaction.response.send_message("🔄 모든 곡이 소진되어 기록이 초기화되었습니다!", ephemeral=True)
+        
+    song = random.choice(available_songs)
+    history.append(song['title'])
+    save_history(history)
+    
+    embed = discord.Embed(
+        title="🎧 오늘의 빅뱅 추천곡 (수동)",
+        description=f"오늘 추천해 드릴 곡은 **{song['title']}** 입니다!",
+        color=0xFFD700
+    )
+    embed.add_field(name="YouTube 링크", value=song['url'], inline=False)
+    await interaction.response.send_message(embed=embed)
+
+# 2. 빅뱅/지드래곤 레전드 명언 & 명대사 뽑기
+@bot.tree.command(name="명언", description="빅뱅 & 지드래곤의 레전드 명언과 명대사를 소환합니다.")
+async def slash_quotes(interaction: discord.Interaction):
+    quotes = [
+        "기적을 믿지 마세요, 노력을 믿으세요.",
+        "정신 차려, 이 각박한 세상 속에서.",
+        "실패는 성공의 어머니가 아니라, 성공의 하녀일 뿐이다.",
+        "내가 만든 길을 걸어갈 뿐이야.",
+        "남들의 시선에 갇히지 말고 너만의 색깔로그려."
+    ]
+    chosen_quote = random.choice(quotes)
+    
+    embed = discord.Embed(
+        title="👑 VIP Lounge 명언 릴레이",
+        description=f"✨ *\"{chosen_quote}\"*",
+        color=0x111111
+    )
+    embed.set_footer(text="BIGBANG IS V.I.P")
+    await interaction.response.send_message(embed=embed)
+
+# 3. 유저 제재 기록 남기기
+@bot.tree.command(name="제재", description="규칙을 위반한 유저에 대한 제재 기록을 남깁니다.")
+async def slash_sanction(interaction: discord.Interaction, member: discord.Member, reason: str):
+    embed = discord.Embed(
+        title="🚨 VIP 서버 제재 조치 안내",
+        description="관리자에 의해 제재가 처리되었습니다.",
+        color=0xFF0000
+    )
+    embed.add_field(name="대상 유저", value=member.mention, inline=True)
+    embed.add_field(name="제재 사유", value=reason, inline=True)
+    embed.set_footer(text=f"처리 관리자: {interaction.user.name}")
+    
+    await interaction.response.send_message(embed=embed)
+
+# 4. 공지사항 / 원하는 글자 임베드 박스 전송
+@bot.tree.command(name="말하기", description="입력한 내용을 깔끔한 임베드 박스로 대신 전송합니다.")
+async def slash_say(interaction: discord.Interaction, message: str):
+    embed = discord.Embed(
+        description=message,
+        color=0x00FF00
+    )
+    embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    
+    await interaction.response.send_message(embed=embed)
+
+# ----------------- ⏰ 매일 자동 실행되는 추천 태스크 -----------------
 
 @tasks.loop(time=datetime.time(hour=9, minute=0, tzinfo=ZoneInfo("Asia/Seoul")))
 async def daily_bigbang_song():
@@ -65,65 +145,4 @@ async def daily_bigbang_song():
 async def before_daily_song():
     await bot.wait_until_ready()
 
-@bot.command(name="빅뱅추천")
-async def recommend_song(ctx):
-    songs = load_songs()
-    history = load_history()
-    available_songs = [s for s in songs if s['title'] not in history]
-    
-    if not available_songs:
-        history = []
-        available_songs = songs
-        await ctx.send("🔄 모든 곡이 소진되어 기록이 초기화되었습니다!")
-        
-    song = random.choice(available_songs)
-    history.append(song['title'])
-    save_history(history)
-    
-    embed = discord.Embed(
-        title="🎧 [수동 요청] 오늘의 빅뱅 추천곡",
-        description=f"**{song['title']}**",
-        color=0xFFD700
-    )
-    embed.add_field(name="YouTube 링크", value=song['url'], inline=False)
-    await ctx.send(embed=embed)
-
 bot.run(BOT_TOKEN)
-
-@bot.event
-async def on_ready():
-    print(f"로그인 완료: {bot.user.name}")
-    # 슬래시 명령어(Slash Commands)를 디스코드 서버에 동기화합니다.
-    try:
-        synced = await bot.tree.sync()
-        print(f"슬래시 명령어 {len(synced)}개 동기화 완료")
-    except Exception as e:
-        print(e)
-        
-    if not daily_bigbang_song.is_running():
-        daily_bigbang_song.start()
-
-# 1. 제재 기록 남기기 슬래시 명령어 (/제재)
-@bot.tree.command(name="제재", description="유저에 대한 제재 기록을 남깁니다.")
-async def sanction(interaction: discord.Interaction, member: discord.Member, reason: str):
-    embed = discord.Embed(
-        title="🚨 유저 제재 기록",
-        description=f"관리자에 의해 제재가 처리되었습니다.",
-        color=0xFF0000
-    )
-    embed.add_field(name="대상 유저", value=member.mention, inline=True)
-    embed.add_field(name="사유", value=reason, inline=True)
-    embed.set_footer(text=f"처리 관리자: {interaction.user.name}")
-    
-    await interaction.response.send_message(embed=embed)
-
-# 2. 원하는 글자를 박스(임베드)로 보내기 슬래시 명령어 (/말하기)
-@bot.tree.command(name="말하기", description="입력한 내용을 예쁜 박스(임베드)로 대신 보냅니다.")
-async def say_embed(interaction: discord.Interaction, message: str):
-    embed = discord.Embed(
-        description=message,
-        color=0x00FF00
-    )
-    embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-    
-    await interaction.response.send_message(embed=embed)
