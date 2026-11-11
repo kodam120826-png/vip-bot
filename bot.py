@@ -10,7 +10,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 💡 [중요] 아래 채널 ID와 봇 토큰을 본인 것으로 꼭 바꿔주세요!
 CHANNEL_ID = 1566416489270087843  # 노래를 받을 디스코드 채널 ID
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
@@ -32,7 +31,9 @@ def save_history(history):
 @bot.event
 async def on_ready():
     print(f"로그인 완료: {bot.user.name}")
-    daily_bigbang_song.start()
+    # 💡 태스크가 이미 실행 중이 아닐 때만 안전하게 시작하도록 수정
+    if not daily_bigbang_song.is_running():
+        daily_bigbang_song.start()
 
 @tasks.loop(time=datetime.time(hour=9, minute=0, tzinfo=ZoneInfo("Asia/Seoul")))
 async def daily_bigbang_song():
