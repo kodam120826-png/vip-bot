@@ -27,14 +27,15 @@ def keep_alive():
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True  # 유저정보 및 서버 인원 정확한 조회를 위해 활성화
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 CHANNEL_ID = 1566416489270087843  # 추천곡을 받을 채널 ID
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# 임시 데이터 저장소 (운영진 출근 시간 & 유저 경고 횟수)
-work_start_times = {}
+# 운영진 근태 데이터 저장소
+# 구조: { user_id: {"start": datetime, "away_start": datetime or None, "total_away_seconds": int} }
+work_records = {}
 user_warnings = {}
 
 def load_songs():
@@ -52,6 +53,13 @@ def save_history(history):
     with open("history.json", "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=4)
 
+def format_duration(seconds: int) -> str:
+    hours, remainder = divmod(seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}시간 {minutes}분"
+    return f"{minutes}분"
+
 @bot.event
 async def on_ready():
     print(f"로그인 완료: {bot.user.name}")
@@ -64,7 +72,128 @@ async def on_ready():
     if not daily_bigbang_song.is_running():
         daily_bigbang_song.start()
 
-# ----------------- 🛡️ 1. 서버 관리 필수 기능 (관리자 전용) -----------------
+# ----------------- 💼 1. 운영진 전용 출퇴근 & 자리비움 로그 -----------------
+
+@bot.tree.command(name="출근", description="운영진 출근 기록을 남깁니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_clock_in(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+    
+    if user_id in work_records:
+        prev_time = work_records[user_id]["start"].strftime("%H시 %M분")
+        await interaction.response.send_message(
+            f"⚠️ **{interaction.user.display_name}**님은 이미 **{prev_time}**에 출근 처리가 되어 있습니다! 먼저 `/퇴근`을 해주세요.",
+            ephemeral=True
+        )
+        return
+
+    work_records[user_id] = {
+        "start": now,
+        "away_start": None,
+        "total_away_seconds": 0
+    }
+    time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    
+    embed = discord.Embed(
+        title="🟢 운영진 출근 로그",
+        description=f"**{interaction.user.mention}**님이 업무를 시작했습니다.",
+        color=0x2ECC71
+    )
+    embed.add_field(name="출근 시각", value=f"`{time_str}`", inline=False)
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    embed.set_footer(text="VIP 서버 운영팀 근태 기록")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="자리비움", description="근무 중 잠시 자리를 비울 때 기록합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_away(interaction: discord.Interaction, reason: str = "개인 용무"):
+    user_id = interaction.user.id
+    now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+    
+    if user_id not in work_records:
+        await interaction.response.send_message("❌ 먼저 `/출근`을 한 상태에서만 자리비움을 사용할 수 있습니다.", ephemeral=True)
+        return
+        
+    if work_records[user_id]["away_start"] is not None:
+        await interaction.response.send_message("⚠️ 이미 자리비움 상태입니다! 돌아오셨다면 `/복귀`를 눌러주세요.", ephemeral=True)
+        return
+        
+    work_records[user_id]["away_start"] = now
+    
+    embed = discord.Embed(
+        title="🟡 운영진 자리비움 로그",
+        description=f"**{interaction.user.mention}**님이 잠시 자리를 비웠습니다.",
+        color=0xF1C40F
+    )
+    embed.add_field(name="자리비움 시각", value=f"`{now.strftime('%H:%M:%S')}`", inline=True)
+    embed.add_field(name="사유", value=reason, inline=True)
+    embed.set_footer(text="복귀 시 /복귀 명령어를 입력해 주세요.")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="복귀", description="자리비움 상태를 해제하고 업무에 복귀합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_back(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+    
+    if user_id not in work_records or work_records[user_id]["away_start"] is None:
+        await interaction.response.send_message("❌ 현재 자리비움 상태가 아닙니다.", ephemeral=True)
+        return
+        
+    away_start = work_records[user_id]["away_start"]
+    away_duration = int((now - away_start).total_seconds())
+    work_records[user_id]["total_away_seconds"] += away_duration
+    work_records[user_id]["away_start"] = None
+    
+    embed = discord.Embed(
+        title="🔵 운영진 업무 복귀 로그",
+        description=f"**{interaction.user.mention}**님이 자리에서 복귀했습니다!",
+        color=0x3498DB
+    )
+    embed.add_field(name="복귀 시각", value=f"`{now.strftime('%H:%M:%S')}`", inline=True)
+    embed.add_field(name="이번 자리비움 시간", value=f"**{format_duration(away_duration)}**", inline=True)
+    embed.set_footer(text="VIP 서버 운영팀 근태 기록")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="퇴근", description="운영진 퇴근 기록과 실제 근무 시간을 남깁니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_clock_out(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+    
+    if user_id not in work_records:
+        await interaction.response.send_message(
+            f"❌ **{interaction.user.display_name}**님의 출근 기록이 없습니다! 먼저 `/출근`을 눌러주세요.",
+            ephemeral=True
+        )
+        return
+
+    record = work_records.pop(user_id)
+    start_time = record["start"]
+    total_away = record["total_away_seconds"]
+    
+    # 만약 자리비움 상태에서 바로 퇴근을 누른 경우, 현재 시간까지를 자리비움으로 합산 처리
+    if record["away_start"] is not None:
+        total_away += int((now - record["away_start"]).total_seconds())
+        
+    total_elapsed = int((now - start_time).total_seconds())
+    actual_work = max(0, total_elapsed - total_away)
+    
+    embed = discord.Embed(
+        title="🔴 운영진 퇴근 로그",
+        description=f"**{interaction.user.mention}**님이 업무를 종료했습니다. 수고하셨습니다!",
+        color=0xE74C3C
+    )
+    embed.add_field(name="출근 시각", value=f"`{start_time.strftime('%H:%M:%S')}`", inline=True)
+    embed.add_field(name="퇴근 시각", value=f"`{now.strftime('%H:%M:%S')}`", inline=True)
+    embed.add_field(name="자리비움 합계", value=f"`{format_duration(total_away)}`", inline=True)
+    embed.add_field(name="실제 순수 근무 시간", value=f"**{format_duration(actual_work)}**", inline=False)
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    embed.set_footer(text="VIP 서버 운영팀 근태 기록")
+    await interaction.response.send_message(embed=embed)
+
+# ----------------- 🛡️ 2. 서버 관리 필수 기능 (관리자 전용) -----------------
 
 @bot.tree.command(name="공지", description="지정한 채널에 깔끔한 공식 공지사항을 올립니다. (관리자 전용)")
 @app_commands.checks.has_permissions(manage_messages=True)
@@ -140,66 +269,6 @@ async def slash_clear(interaction: discord.Interaction, amount: int):
     await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=amount)
     await interaction.followup.send(f"🧹 최근 메시지 **{len(deleted)}개**를 깔끔하게 삭제했습니다.", ephemeral=True)
-
-# ----------------- 💼 2. 운영진 전용 출퇴근 로그 -----------------
-
-@bot.tree.command(name="출근", description="운영진 출근 기록을 남깁니다. (관리자 전용)")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def slash_clock_in(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
-    
-    if user_id in work_start_times:
-        prev_time = work_start_times[user_id].strftime("%H시 %M분")
-        await interaction.response.send_message(
-            f"⚠️ **{interaction.user.display_name}**님은 이미 **{prev_time}**에 출근 처리가 되어 있습니다! 먼저 `/퇴근`을 해주세요.",
-            ephemeral=True
-        )
-        return
-
-    work_start_times[user_id] = now
-    time_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    
-    embed = discord.Embed(
-        title="🟢 운영진 출근 로그",
-        description=f"**{interaction.user.mention}**님이 업무를 시작했습니다.",
-        color=0x2ECC71
-    )
-    embed.add_field(name="출근 시각", value=f"`{time_str}`", inline=False)
-    embed.set_thumbnail(url=interaction.user.display_avatar.url)
-    embed.set_footer(text="VIP 서버 운영팀 근태 기록")
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="퇴근", description="운영진 퇴근 기록과 총 근무 시간을 남깁니다. (관리자 전용)")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def slash_clock_out(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
-    
-    if user_id not in work_start_times:
-        await interaction.response.send_message(
-            f"❌ **{interaction.user.display_name}**님의 출근 기록이 없습니다! 먼저 `/출근`을 눌러주세요.",
-            ephemeral=True
-        )
-        return
-
-    start_time = work_start_times.pop(user_id)
-    duration = now - start_time
-    total_seconds = int(duration.total_seconds())
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, _ = divmod(remainder, 60)
-    
-    embed = discord.Embed(
-        title="🔴 운영진 퇴근 로그",
-        description=f"**{interaction.user.mention}**님이 업무를 종료했습니다. 수고하셨습니다!",
-        color=0xE74C3C
-    )
-    embed.add_field(name="출근 시각", value=f"`{start_time.strftime('%H:%M:%S')}`", inline=True)
-    embed.add_field(name="퇴근 시각", value=f"`{now.strftime('%H:%M:%S')}`", inline=True)
-    embed.add_field(name="총 근무 시간", value=f"**{hours}시간 {minutes}분**", inline=False)
-    embed.set_thumbnail(url=interaction.user.display_avatar.url)
-    embed.set_footer(text="VIP 서버 운영팀 근태 기록")
-    await interaction.response.send_message(embed=embed)
 
 # ----------------- 🔍 3. 있으면 편한 서버/유저 편의 기능 -----------------
 
@@ -354,6 +423,8 @@ async def slash_dice(interaction: discord.Interaction):
 @slash_clear.error
 @slash_clock_in.error
 @slash_clock_out.error
+@slash_away.error
+@slash_back.error
 async def admin_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("❌ 이 명령어는 운영진 권한이 있는 관리자만 사용할 수 있습니다.", ephemeral=True)
