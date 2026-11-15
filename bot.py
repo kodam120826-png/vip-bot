@@ -34,7 +34,6 @@ CHANNEL_ID = 1566416489270087843  # 추천곡을 받을 채널 ID
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 # 운영진 근태 데이터 저장소
-# 구조: { user_id: {"start": datetime, "away_start": datetime or None, "total_away_seconds": int} }
 work_records = {}
 user_warnings = {}
 
@@ -173,7 +172,6 @@ async def slash_clock_out(interaction: discord.Interaction):
     start_time = record["start"]
     total_away = record["total_away_seconds"]
     
-    # 만약 자리비움 상태에서 바로 퇴근을 누른 경우, 현재 시간까지를 자리비움으로 합산 처리
     if record["away_start"] is not None:
         total_away += int((now - record["away_start"]).total_seconds())
         
@@ -386,12 +384,12 @@ async def slash_quiz(interaction: discord.Interaction):
 async def slash_bias_poll(interaction: discord.Interaction):
     embed = discord.Embed(
         title="💛 오늘 당신의 최애 멤버는?",
-        description="아래 이모지를 눌러 투표에 참여해 주세요!\n\n🐉 **G-DRAGON**\n🌞 **태양 (TAEYANG)**\n🔝 **T.O.P**\n👼 **대성 (DAESUNG)**",
+        description="아래 이모지를 눌러 투표에 참여해 주세요!\n\n🐉 **G-DRAGON**\n🌞 **태양 (TAEYANG)**\n👼 **대성 (DAESUNG)**",
         color=0xFFD700
     )
     await interaction.response.send_message(embed=embed)
     msg = await interaction.original_response()
-    for emoji in ["🐉", "🌞", "🔝", "👼"]:
+    for emoji in ["🐉", "🌞", "👼"]:
         await msg.add_reaction(emoji)
 
 @bot.tree.command(name="운세", description="오늘의 VIP 덕질 운세를 확인합니다.")
