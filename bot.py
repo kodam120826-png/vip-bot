@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from threading import Thread
 from flask import Flask
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 # 1. 렌더 포트 에러 방지용 가벼운 웹 서버 설정 (Flask)
@@ -26,10 +27,15 @@ def keep_alive():
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True  # 유저정보 및 서버 인원 정확한 조회를 위해 활성화
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-CHANNEL_ID = 1566416489270087843  # 노래를 받을 디스코드 채널 ID
+CHANNEL_ID = 1566416489270087843  # 추천곡을 받을 채널 ID
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+
+# 임시 데이터 저장소 (운영진 출근 시간 & 유저 경고 횟수)
+work_start_times = {}
+user_warnings = {}
 
 def load_songs():
     with open("songs.json", "r", encoding="utf-8") as f:
@@ -49,8 +55,6 @@ def save_history(history):
 @bot.event
 async def on_ready():
     print(f"로그인 완료: {bot.user.name}")
-    
-    # 슬래시 명령어 목록 동기화
     try:
         synced = await bot.tree.sync()
         print(f"슬래시 명령어 {len(synced)}개 동기화 완료")
@@ -60,7 +64,197 @@ async def on_ready():
     if not daily_bigbang_song.is_running():
         daily_bigbang_song.start()
 
-# ----------------- 🎵 빅뱅 팬덤 맞춤 슬래시 명령어 -----------------
+# ----------------- 🛡️ 1. 서버 관리 필수 기능 (관리자 전용) -----------------
+
+@bot.tree.command(name="공지", description="지정한 채널에 깔끔한 공식 공지사항을 올립니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_announce(interaction: discord.Interaction, channel: discord.TextChannel, title: str, content: str):
+    embed = discord.Embed(
+        title=f"📢 {title}",
+        description=content,
+        color=0xFFD700
+    )
+    embed.set_footer(text=f"작성자: {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+    await channel.send(embed=embed)
+    await interaction.response.send_message(f"✅ {channel.mention} 채널에 공지사항을 등록했습니다!", ephemeral=True)
+
+@bot.tree.command(name="경고", description="규칙 위반 유저에게 누적 경고를 부여합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_warn(interaction: discord.Interaction, member: discord.Member, reason: str):
+    user_id = member.id
+    user_warnings[user_id] = user_warnings.get(user_id, 0) + 1
+    count = user_warnings[user_id]
+    
+    embed = discord.Embed(
+        title="⚠️ VIP 서버 경고 안내",
+        description=f"{member.mention}님에게 경고가 부여되었습니다.",
+        color=0xFFA500
+    )
+    embed.add_field(name="사유", value=reason, inline=True)
+    embed.add_field(name="누적 경고", value=f"**{count}회** / 3회", inline=True)
+    
+    if count >= 3:
+        embed.add_field(name="🚨 3회 누적 안내", value="경고가 3회 누적되었습니다. 추가 제재(`/타임아웃` 또는 `/제재`)를 검토해 주세요.", inline=False)
+        
+    embed.set_footer(text=f"담당 운영진: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="타임아웃", description="유저를 지정한 시간(분) 동안 채팅 금지 처리합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def slash_timeout(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str):
+    if minutes < 1 or minutes > 10080:
+        await interaction.response.send_message("❌ 1분에서 최대 10080분(7일) 사이로 입력해 주세요.", ephemeral=True)
+        return
+        
+    duration = datetime.timedelta(minutes=minutes)
+    await member.timeout(duration, reason=reason)
+    
+    embed = discord.Embed(
+        title="🔇 타임아웃(채팅 금지) 조치",
+        description=f"{member.mention}님이 **{minutes}분** 동안 타임아웃 처리되었습니다.",
+        color=0xE74C3C
+    )
+    embed.add_field(name="사유", value=reason, inline=False)
+    embed.set_footer(text=f"처리 관리자: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="제재", description="규칙을 위반한 유저에 대한 제재 기록을 남깁니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_sanction(interaction: discord.Interaction, member: discord.Member, reason: str):
+    embed = discord.Embed(
+        title="🚨 VIP 서버 제재 조치 안내",
+        description="관리자에 의해 제재가 처리되었습니다.",
+        color=0xFF0000
+    )
+    embed.add_field(name="대상 유저", value=member.mention, inline=True)
+    embed.add_field(name="제재 사유", value=reason, inline=True)
+    embed.set_footer(text=f"처리 관리자: {interaction.user.name}")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="청소", description="채팅창의 메시지를 지정한 개수만큼 한 번에 삭제합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_clear(interaction: discord.Interaction, amount: int):
+    if amount < 1 or amount > 100:
+        await interaction.response.send_message("❌ 1개에서 100개 사이의 숫자만 입력할 수 있습니다.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    deleted = await interaction.channel.purge(limit=amount)
+    await interaction.followup.send(f"🧹 최근 메시지 **{len(deleted)}개**를 깔끔하게 삭제했습니다.", ephemeral=True)
+
+# ----------------- 💼 2. 운영진 전용 출퇴근 로그 -----------------
+
+@bot.tree.command(name="출근", description="운영진 출근 기록을 남깁니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_clock_in(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+    
+    if user_id in work_start_times:
+        prev_time = work_start_times[user_id].strftime("%H시 %M분")
+        await interaction.response.send_message(
+            f"⚠️ **{interaction.user.display_name}**님은 이미 **{prev_time}**에 출근 처리가 되어 있습니다! 먼저 `/퇴근`을 해주세요.",
+            ephemeral=True
+        )
+        return
+
+    work_start_times[user_id] = now
+    time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    
+    embed = discord.Embed(
+        title="🟢 운영진 출근 로그",
+        description=f"**{interaction.user.mention}**님이 업무를 시작했습니다.",
+        color=0x2ECC71
+    )
+    embed.add_field(name="출근 시각", value=f"`{time_str}`", inline=False)
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    embed.set_footer(text="VIP 서버 운영팀 근태 기록")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="퇴근", description="운영진 퇴근 기록과 총 근무 시간을 남깁니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_clock_out(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+    
+    if user_id not in work_start_times:
+        await interaction.response.send_message(
+            f"❌ **{interaction.user.display_name}**님의 출근 기록이 없습니다! 먼저 `/출근`을 눌러주세요.",
+            ephemeral=True
+        )
+        return
+
+    start_time = work_start_times.pop(user_id)
+    duration = now - start_time
+    total_seconds = int(duration.total_seconds())
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+    
+    embed = discord.Embed(
+        title="🔴 운영진 퇴근 로그",
+        description=f"**{interaction.user.mention}**님이 업무를 종료했습니다. 수고하셨습니다!",
+        color=0xE74C3C
+    )
+    embed.add_field(name="출근 시각", value=f"`{start_time.strftime('%H:%M:%S')}`", inline=True)
+    embed.add_field(name="퇴근 시각", value=f"`{now.strftime('%H:%M:%S')}`", inline=True)
+    embed.add_field(name="총 근무 시간", value=f"**{hours}시간 {minutes}분**", inline=False)
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    embed.set_footer(text="VIP 서버 운영팀 근태 기록")
+    await interaction.response.send_message(embed=embed)
+
+# ----------------- 🔍 3. 있으면 편한 서버/유저 편의 기능 -----------------
+
+@bot.tree.command(name="유저정보", description="멤버의 가입일, 계정 생성일, 보유 역할을 확인합니다.")
+async def slash_userinfo(interaction: discord.Interaction, member: discord.Member = None):
+    target = member or interaction.user
+    roles = [role.mention for role in target.roles if role.name != "@everyone"]
+    roles_str = ", ".join(roles) if roles else "없음"
+    
+    embed = discord.Embed(
+        title=f"👤 {target.display_name}님의 정보",
+        color=0x3498DB
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="디스코드 계정 생성일", value=target.created_at.strftime("%Y-%m-%d"), inline=True)
+    embed.add_field(name="서버 가입일", value=target.joined_at.strftime("%Y-%m-%d") if target.joined_at else "알 수 없음", inline=True)
+    embed.add_field(name="누적 경고", value=f"{user_warnings.get(target.id, 0)}회", inline=True)
+    embed.add_field(name=f"보유 역할 ({len(roles)}개)", value=roles_str, inline=False)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="서버정보", description="현재 서버의 인원수와 주요 현황을 확인합니다.")
+async def slash_serverinfo(interaction: discord.Interaction):
+    guild = interaction.guild
+    embed = discord.Embed(
+        title=f"👑 {guild.name} 서버 현황",
+        color=0xFFD700
+    )
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    embed.add_field(name="서버 주인", value=guild.owner.mention if guild.owner else "알 수 없음", inline=True)
+    embed.add_field(name="전체 멤버 수", value=f"**{guild.member_count}명**", inline=True)
+    embed.add_field(name="서버 개설일", value=guild.created_at.strftime("%Y-%m-%d"), inline=True)
+    embed.add_field(name="부스트 레벨", value=f"레벨 {guild.premium_tier} ({guild.premium_subscription_count}부스트)", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="투표만들기", description="찬성/반대 투표를 빠르게 생성합니다.")
+async def slash_poll(interaction: discord.Interaction, topic: str):
+    embed = discord.Embed(
+        title="📊 서버 투표 안내",
+        description=f"**주제:** {topic}\n\n⭕ 찬성  |  ❌ 반대",
+        color=0x3498DB
+    )
+    embed.set_footer(text=f"개설자: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+    msg = await interaction.original_response()
+    await msg.add_reaction("⭕")
+    await msg.add_reaction("❌")
+
+@bot.tree.command(name="말하기", description="입력한 내용을 깔끔한 임베드 박스로 대신 전송합니다.")
+async def slash_say(interaction: discord.Interaction, message: str):
+    embed = discord.Embed(description=message, color=0x00FF00)
+    embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+# ----------------- 🎵 4. 빅뱅 팬덤 & 미니게임 기능 -----------------
 
 @bot.tree.command(name="오늘의추천", description="오늘의 빅뱅 추천곡을 수동으로 뽑습니다!")
 async def slash_recommend_song(interaction: discord.Interaction):
@@ -71,7 +265,6 @@ async def slash_recommend_song(interaction: discord.Interaction):
     if not available_songs:
         history = []
         available_songs = songs
-        await interaction.response.send_message("🔄 모든 곡이 소진되어 기록이 초기화되었습니다!", ephemeral=True)
         
     song = random.choice(available_songs)
     history.append(song['title'])
@@ -92,50 +285,90 @@ async def slash_quotes(interaction: discord.Interaction):
         "정신 차려, 이 각박한 세상 속에서.",
         "실패는 성공의 어머니가 아니라, 성공의 하녀일 뿐이다.",
         "내가 만든 길을 걸어갈 뿐이야.",
-        "남들의 시선에 갇히지 말고 너만의 색깔로그려."
+        "남들의 시선에 갇히지 말고 너만의 색깔로 그려.",
+        "처음부터 잘하는 사람은 없어요. 그냥 미친 듯이 하는 거죠."
     ]
-    chosen_quote = random.choice(quotes)
-    
     embed = discord.Embed(
         title="👑 VIP Lounge 명언 릴레이",
-        description=f"✨ *\"{chosen_quote}\"*",
+        description=f"✨ *\"{random.choice(quotes)}\"*",
         color=0x111111
     )
     embed.set_footer(text="BIGBANG IS V.I.P")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="제재", description="규칙을 위반한 유저에 대한 제재 기록을 남깁니다.")
-async def slash_sanction(interaction: discord.Interaction, member: discord.Member, reason: str):
+@bot.tree.command(name="빅뱅퀴즈", description="랜덤 빅뱅 팬덤 퀴즈를 출제합니다!")
+async def slash_quiz(interaction: discord.Interaction):
+    quizzes = [
+        {"q": "빅뱅의 공식 데뷔일은 언제일까요?", "a": "2006년 8월 19일"},
+        {"q": "빅뱅의 공식 응원봉 이름은 무엇일까요?", "a": "뱅봉 (왕관봉)"},
+        {"q": "지드래곤이 직접 디자인에 참여한 빅뱅 응원봉의 상징 모양은?", "a": "왕관"},
+        {"q": "2007년 발매되어 전국민적인 신드롬을 일으킨 빅뱅의 대표 메가히트곡은?", "a": "거짓말"},
+        {"q": "빅뱅의 공식 팬클럽 이름은 무엇일까요?", "a": "V.I.P (VIP)"}
+    ]
+    quiz = random.choice(quizzes)
     embed = discord.Embed(
-        title="🚨 VIP 서버 제재 조치 안내",
-        description="관리자에 의해 제재가 처리되었습니다.",
-        color=0xFF0000
+        title="❓ VIP 팬덤 능력고사 퀴즈!",
+        description=f"**문제:** {quiz['q']}\n\n정답은 아래 스포일러를 클릭해 확인하세요!\n|| 정답: **{quiz['a']}** ||",
+        color=0xFFD700
     )
-    embed.add_field(name="대상 유저", value=member.mention, inline=True)
-    embed.add_field(name="제재 사유", value=reason, inline=True)
-    embed.set_footer(text=f"처리 관리자: {interaction.user.name}")
-    
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="말하기", description="입력한 내용을 깔끔한 임베드 박스로 대신 전송합니다.")
-async def slash_say(interaction: discord.Interaction, message: str):
+@bot.tree.command(name="최애투표", description="오늘의 최애 멤버 인기투표를 생성합니다.")
+async def slash_bias_poll(interaction: discord.Interaction):
     embed = discord.Embed(
-        description=message,
-        color=0x00FF00
+        title="💛 오늘 당신의 최애 멤버는?",
+        description="아래 이모지를 눌러 투표에 참여해 주세요!\n\n🐉 **G-DRAGON**\n🌞 **태양 (TAEYANG)**\n🔝 **T.O.P**\n👼 **대성 (DAESUNG)**",
+        color=0xFFD700
     )
-    embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-    
+    await interaction.response.send_message(embed=embed)
+    msg = await interaction.original_response()
+    for emoji in ["🐉", "🌞", "🔝", "👼"]:
+        await msg.add_reaction(emoji)
+
+@bot.tree.command(name="운세", description="오늘의 VIP 덕질 운세를 확인합니다.")
+async def slash_fortune(interaction: discord.Interaction):
+    fortunes = [
+        "🌟 대길: 오늘 최애의 떡밥이나 레전드 직캠을 발견할 확률 200%!",
+        "🎵 길: 우연히 들른 카페나 길거리에서 빅뱅 노래가 흘러나올 운세!",
+        "💛 행운: 굿즈나 포토카드 교환/구매에서 엄청난 행운이 따릅니다.",
+        "🔥 열정: 오늘은 빅뱅 콘서트 라이브 영상 정주행하기 딱 좋은 날!",
+        "🍀 평온: 좋아하는 노래 들으며 기분 좋게 하루를 마무리할 수 있어요."
+    ]
+    embed = discord.Embed(
+        title=f"🔮 {interaction.user.display_name}님의 오늘의 VIP 운세",
+        description=random.choice(fortunes),
+        color=0x9B59B6
+    )
     await interaction.response.send_message(embed=embed)
 
-# ----------------- ⏰ 매일 자동 실행되는 추천 태스크 -----------------
+@bot.tree.command(name="주사위", description="1부터 100 사이의 랜덤 주사위를 굴립니다.")
+async def slash_dice(interaction: discord.Interaction):
+    num = random.randint(1, 100)
+    await interaction.response.send_message(f"🎲 **{interaction.user.display_name}**님이 주사위를 굴려 **{num}**이(가) 나왔습니다!")
 
-@tasks.loop(time=datetime.time(hour=9, minute=0, tzinfo=ZoneInfo("Asia/Seoul")))
+# 관리자 전용 명령어 권한 에러 통합 처리
+@slash_announce.error
+@slash_warn.error
+@slash_timeout.error
+@slash_sanction.error
+@slash_clear.error
+@slash_clock_in.error
+@slash_clock_out.error
+async def admin_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ 이 명령어는 운영진 권한이 있는 관리자만 사용할 수 있습니다.", ephemeral=True)
+
+# ----------------- ⏰ 하루 2번(오전 8시, 오후 3시) 자동 추천 태스크 -----------------
+
+@tasks.loop(time=[
+    datetime.time(hour=8, minute=0, tzinfo=ZoneInfo("Asia/Seoul")),
+    datetime.time(hour=15, minute=0, tzinfo=ZoneInfo("Asia/Seoul"))
+])
 async def daily_bigbang_song():
     channel = bot.get_channel(CHANNEL_ID)
     if channel is not None:
         songs = load_songs()
         history = load_history()
-        
         available_songs = [s for s in songs if s['title'] not in history]
         
         if not available_songs:
@@ -149,7 +382,7 @@ async def daily_bigbang_song():
         
         embed = discord.Embed(
             title="🎶 오늘의 빅뱅 추천곡!",
-            description=f"오늘 추천해 드릴 곡은 **{song['title']}** 입니다!",
+            description=f"이번 시간에 추천해 드릴 곡은 **{song['title']}** 입니다!",
             color=0xFFD700
         )
         embed.add_field(name="YouTube 링크", value=song['url'], inline=False)
@@ -159,7 +392,6 @@ async def daily_bigbang_song():
 async def before_daily_song():
     await bot.wait_until_ready()
 
-# 3. 프로그램 실행 시 웹 서버와 봇을 함께 구동
 if __name__ == "__main__":
     keep_alive()
     bot.run(BOT_TOKEN)
