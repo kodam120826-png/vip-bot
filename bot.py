@@ -30,8 +30,8 @@ intents.message_content = True
 intents.members = True  # 새 멤버 입장 감지 및 유저정보 조회용 필수 권한
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-CHANNEL_ID = 1566416489270087843          # 추천곡을 받을 채널 ID
-WELCOME_CHANNEL_ID = 1566415614057127936  # 새 멤버 환영 인사를 보낼 채널 ID
+CHANNEL_ID = 1566416489270087843          # 🎵 오늘의 추천곡을 받을 채널 ID
+WELCOME_CHANNEL_ID = 1566415614057127936  # 🎉 새 멤버 환영 인사를 보낼 채널 ID
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 # 운영진 근태 데이터 및 경고 저장소
@@ -72,7 +72,7 @@ async def on_ready():
     if not daily_bigbang_song.is_running():
         daily_bigbang_song.start()
 
-# ----------------- 🎉 새 멤버 자동 환영 이벤트 (계정 생성일/가입일 포함) -----------------
+# ----------------- 🎉 새 멤버 자동 환영 이벤트 (환영 채널 고정) -----------------
 
 @bot.event
 async def on_member_join(member: discord.Member):
