@@ -27,13 +27,14 @@ def keep_alive():
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
+intents.members = True  # 새 멤버 입장 감지 및 유저정보 조회용 필수 권한
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-CHANNEL_ID = 1566416489270087843  # 추천곡을 받을 채널 ID
+CHANNEL_ID = 1566416489270087843          # 추천곡을 받을 채널 ID
+WELCOME_CHANNEL_ID = 1566416489270087843  # 새 멤버 환영 인사를 보낼 채널 ID (원하는 채널 ID로 변경 가능)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# 운영진 근태 데이터 저장소
+# 운영진 근태 데이터 및 경고 저장소
 work_records = {}
 user_warnings = {}
 
@@ -70,6 +71,23 @@ async def on_ready():
         
     if not daily_bigbang_song.is_running():
         daily_bigbang_song.start()
+
+# ----------------- 🎉 새 멤버 자동 환영 이벤트 -----------------
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    channel = bot.get_channel(WELCOME_CHANNEL_ID)
+    if channel is not None:
+        embed = discord.Embed(
+            title="👑 WELCOME TO VIP UNIVERSE!",
+            description=f"{member.mention}님, **{member.guild.name}**에 오신 것을 진심으로 환영합니다! 💛\n\n"
+                        f"당신은 우리 서버의 **{member.guild.member_count}번째** VIP 멤버입니다!\n"
+                        f"공지사항과 규칙을 꼭 확인해 주시고, 다 함께 즐겁게 소통해요! 🎶",
+            color=0xFFD700
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text=f"가입일시: {datetime.datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y-%m-%d %H:%M')}")
+        await channel.send(content=f"🎉 새로운 vip의 등장입니다! 모두들 반겨줍시다! {member.mention}", embed=embed)
 
 # ----------------- 💼 1. 운영진 전용 출퇴근 & 자리비움 로그 -----------------
 
@@ -363,14 +381,44 @@ async def slash_quotes(interaction: discord.Interaction):
     embed.set_footer(text="BIGBANG IS V.I.P")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="빅뱅퀴즈", description="랜덤 빅뱅 팬덤 퀴즈를 출제합니다!")
+@bot.tree.command(name="빅뱅퀴즈", description="랜덤 빅뱅 팬덤 퀴즈를 출제합니다! (총 30문제)")
 async def slash_quiz(interaction: discord.Interaction):
     quizzes = [
+        # --- 기본 & 팬덤 상식 (1~10) ---
         {"q": "빅뱅의 공식 데뷔일은 언제일까요?", "a": "2006년 8월 19일"},
+        {"q": "빅뱅의 공식 팬클럽 이름은 무엇일까요?", "a": "V.I.P (VIP)"},
         {"q": "빅뱅의 공식 응원봉 이름은 무엇일까요?", "a": "뱅봉 (왕관봉)"},
         {"q": "지드래곤이 직접 디자인에 참여한 빅뱅 응원봉의 상징 모양은?", "a": "왕관"},
+        {"q": "빅뱅의 리더를 맡고 있는 멤버는 누구일까요?", "a": "지드래곤 (G-DRAGON)"},
+        {"q": "멤버 지드래곤(G-DRAGON)의 본명은 무엇일까요?", "a": "권지용"},
+        {"q": "멤버 태양(TAEYANG)의 본명은 무엇일까요?", "a": "동영배"},
+        {"q": "멤버 대성(DAESUNG)의 본명은 무엇일까요?", "a": "강대성"},
+        {"q": "빅뱅 멤버들 중 막내라인에 속하며 보컬과 예능감을 담당하는 멤버는?", "a": "대성"},
+        {"q": "빅뱅이 처음 결성될 때 방영되었던 다큐멘터리 프로그램의 제목은?", "a": "리얼다큐 빅뱅"},
+
+        # --- 앨범 & 히트곡 (11~20) ---
         {"q": "2007년 발매되어 전국민적인 신드롬을 일으킨 빅뱅의 대표 메가히트곡은?", "a": "거짓말"},
-        {"q": "빅뱅의 공식 팬클럽 이름은 무엇일까요?", "a": "V.I.P (VIP)"}
+        {"q": "2008년 발매된 '하루하루'의 뮤직비디오에서 시한부 연기를 펼친 여주인공 배우는?", "a": "박민영"},
+        {"q": "빅뱅의 첫 번째 정규 앨범(1집) 타이틀 곡은 무엇일까요?", "a": "BIGBANG (La La La)"},
+        {"q": "2012년 발매되어 '붐샤칼라카' 열풍을 일으킨 곡이 수록된 미니앨범 이름은?", "a": "ALIVE"},
+        {"q": "2015년 매달 신곡을 발표하며 가요계를 휩쓴 빅뱅의 싱글 프로젝트 시리즈 이름은?", "a": "MADE"},
+        {"q": "2015년 멜론 연간 차트 1위를 차지한 빅뱅의 대표 댄스곡은?", "a": "뱅뱅뱅 (BANG BANG BANG)"},
+        {"q": "2018년 군 입대 전 팬들을 위해 깜짝 발표한 디지털 싱글의 제목은?", "a": "꽃길 (FLOWER ROAD)"},
+        {"q": "2022년 4월 4일 4년 만에 컴백하며 발표한 서정적인 감성의 곡 제목은?", "a": "봄여름가을겨울 (Still Life)"},
+        {"q": "이문세의 명곡을 빅뱅만의 스타일로 리메이크해 큰 사랑을 받은 곡은?", "a": "붉은 노을"},
+        {"q": "빅뱅 정규 3집 《MADE》의 더블 타이틀곡은 '에라 모르겠다'와 무엇일까요?", "a": "LAST DANCE"},
+
+        # --- 솔로 활동 & 레전드 무대 (21~30) ---
+        {"q": "지드래곤의 첫 번째 솔로 정규 앨범이자 메가히트곡의 제목은?", "a": "Heartbreaker (하트브레이커)"},
+        {"q": "2024년 10월 지드래곤이 7년 4개월 만에 발표한 솔로 디지털 싱글 제목은?", "a": "POWER"},
+        {"q": "지드래곤의 곡으로 태양과 대성이 피처링에 참여해 2024 MAMA 무대를 뒤집어놓은 곡은?", "a": "HOME SWEET HOME"},
+        {"q": "태양의 대표 솔로 발라드곡으로 수많은 가수들이 커버한 명곡은?", "a": "눈, 코, 입"},
+        {"q": "지드래곤과 태양이 결성한 힙합 유닛 'GD X TAEYANG'의 대표곡은?", "a": "GOOD BOY"},
+        {"q": "대성이 2008년 발매하여 전 세대에게 사랑받은 트로트 데뷔곡은?", "a": "날 봐, 귀순"},
+        {"q": "대성이 운영하고 있는 개인 유튜브 채널의 이름은 무엇일까요?", "a": "집대성"},
+        {"q": "지드래곤이 '무한도전' 영동고속도로 가요제에서 박명수와 함께 부른 곡은?", "a": "바람났어"},
+        {"q": "태양이 솔로 미니 2집에서 방탄소년단(BTS) 지민과 협업해 발표한 곡은?", "a": "VIBE"},
+        {"q": "지드래곤이 론칭한 본인의 패션 브랜드 이름은 무엇일까요?", "a": "피스마이너스원 (PEACEMINUSONE)"}
     ]
     quiz = random.choice(quizzes)
     embed = discord.Embed(
@@ -378,6 +426,7 @@ async def slash_quiz(interaction: discord.Interaction):
         description=f"**문제:** {quiz['q']}\n\n정답은 아래 스포일러를 클릭해 확인하세요!\n|| 정답: **{quiz['a']}** ||",
         color=0xFFD700
     )
+    embed.set_footer(text=f"총 {len(quizzes)}문제 중 랜덤 출제")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="최애투표", description="오늘의 최애 멤버 인기투표를 생성합니다.")
