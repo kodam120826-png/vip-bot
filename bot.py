@@ -31,7 +31,7 @@ intents.members = True  # 새 멤버 입장 감지 및 유저정보 조회용 �
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 CHANNEL_ID = 1566416489270087843          # 추천곡을 받을 채널 ID
-WELCOME_CHANNEL_ID = 1566416489270087843  # 새 멤버 환영 인사를 보낼 채널 ID (원하는 채널 ID로 변경 가능)
+WELCOME_CHANNEL_ID = 1566415614057127936  # 새 멤버 환영 인사를 보낼 채널 ID
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 # 운영진 근태 데이터 및 경고 저장소
@@ -72,12 +72,15 @@ async def on_ready():
     if not daily_bigbang_song.is_running():
         daily_bigbang_song.start()
 
-# ----------------- 🎉 새 멤버 자동 환영 이벤트 -----------------
+# ----------------- 🎉 새 멤버 자동 환영 이벤트 (계정 생성일/가입일 포함) -----------------
 
 @bot.event
 async def on_member_join(member: discord.Member):
     channel = bot.get_channel(WELCOME_CHANNEL_ID)
     if channel is not None:
+        created_at_str = member.created_at.strftime("%Y-%m-%d")
+        joined_at_str = member.joined_at.strftime("%Y-%m-%d %H:%M") if member.joined_at else "알 수 없음"
+        
         embed = discord.Embed(
             title="👑 WELCOME TO VIP UNIVERSE!",
             description=f"{member.mention}님, **{member.guild.name}**에 오신 것을 진심으로 환영합니다! 💛\n\n"
@@ -86,7 +89,10 @@ async def on_member_join(member: discord.Member):
             color=0xFFD700
         )
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text=f"가입일시: {datetime.datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y-%m-%d %H:%M')}")
+        embed.add_field(name="📅 디스코드 계정 생성일", value=created_at_str, inline=True)
+        embed.add_field(name="✨ 서버 가입일시", value=joined_at_str, inline=True)
+        embed.set_footer(text=f"VIP UNIVERSE 서버 입장 관리 시스템")
+        
         await channel.send(content=f"🎉 새로운 vip의 등장입니다! 모두들 반겨줍시다! {member.mention}", embed=embed)
 
 # ----------------- 💼 1. 운영진 전용 출퇴근 & 자리비움 로그 -----------------
