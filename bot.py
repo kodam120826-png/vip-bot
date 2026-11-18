@@ -2,6 +2,7 @@ import os
 import json
 import random
 import datetime
+import sqlite3
 from zoneinfo import ZoneInfo
 from threading import Thread
 from flask import Flask
@@ -23,7 +24,7 @@ def keep_alive():
     t = Thread(target=run_flask)
     t.start()
 
-# ----------------- 디스코드 봇 설정 -----------------
+# ----------------- 디스코드 봇 설정 & DB 초기화 -----------------
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -34,9 +35,36 @@ CHANNEL_ID = 1566416489270087843          # 🎵 오늘의 추천곡을 받을 �
 WELCOME_CHANNEL_ID = 1566415614057127936  # 🎉 새 멤버 환영 인사를 보낼 채널 ID
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# 운영진 근태 데이터 및 경고 저장소
-work_records = {}
-user_warnings = {}
+# SQLite 영구 데이터베이스 세팅 (출근 기록, 누적 횟수, 상세 경고 로그)
+db_conn = sqlite3.connect("vip_bot.db", check_same_thread=False)
+db_cursor = db_conn.cursor()
+
+db_cursor.execute("""
+CREATE TABLE IF NOT EXISTS work_records (
+    user_id INTEGER PRIMARY KEY,
+    start_time TEXT,
+    away_start TEXT,
+    total_away_seconds INTEGER
+)
+""")
+
+db_cursor.execute("""
+CREATE TABLE IF NOT EXISTS warnings (
+    user_id INTEGER PRIMARY KEY,
+    warning_count INTEGER
+)
+""")
+
+db_cursor.execute("""
+CREATE TABLE IF NOT EXISTS warning_logs (
+    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    moderator_name TEXT,
+    reason TEXT,
+    timestamp TEXT
+)
+""")
+db_conn.commit()
 
 def load_songs():
     with open("songs.json", "r", encoding="utf-8") as f:
@@ -72,7 +100,7 @@ async def on_ready():
     if not daily_bigbang_song.is_running():
         daily_bigbang_song.start()
 
-# ----------------- 🎉 새 멤버 자동 환영 이벤트 (환영 채널 고정) -----------------
+# ----------------- 🎉 새 멤버 자동 환영 이벤트 (채널 분리 완료) -----------------
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -91,11 +119,11 @@ async def on_member_join(member: discord.Member):
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(name="📅 디스코드 계정 생성일", value=created_at_str, inline=True)
         embed.add_field(name="✨ 서버 가입일시", value=joined_at_str, inline=True)
-        embed.set_footer(text=f"VIP UNIVERSE 서버 입장 관리 시스템")
+        embed.set_footer(text="VIP UNIVERSE 서버 입장 관리 시스템")
         
         await channel.send(content=f"🎉 새로운 vip의 등장입니다! 모두들 반겨줍시다! {member.mention}", embed=embed)
 
-# ----------------- 💼 1. 운영진 전용 출퇴근 & 자리비움 로그 -----------------
+# ----------------- 💼 1. 영구 DB 연동 출퇴근 & 자리비움 & 근무자목록 -----------------
 
 @bot.tree.command(name="출근", description="운영진 출근 기록을 남깁니다. (관리자 전용)")
 @app_commands.checks.has_permissions(manage_messages=True)
@@ -103,20 +131,22 @@ async def slash_clock_in(interaction: discord.Interaction):
     user_id = interaction.user.id
     now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
     
-    if user_id in work_records:
-        prev_time = work_records[user_id]["start"].strftime("%H시 %M분")
+    db_cursor.execute("SELECT start_time FROM work_records WHERE user_id = ?", (user_id,))
+    row = db_cursor.fetchone()
+    
+    if row:
         await interaction.response.send_message(
-            f"⚠️ **{interaction.user.display_name}**님은 이미 **{prev_time}**에 출근 처리가 되어 있습니다! 먼저 `/퇴근`을 해주세요.",
+            f"⚠️ **{interaction.user.display_name}**님은 이미 출근 처리가 되어 있습니다! 먼저 `/퇴근`을 해주세요.",
             ephemeral=True
         )
         return
 
-    work_records[user_id] = {
-        "start": now,
-        "away_start": None,
-        "total_away_seconds": 0
-    }
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    db_cursor.execute(
+        "INSERT INTO work_records (user_id, start_time, away_start, total_away_seconds) VALUES (?, ?, NULL, 0)",
+        (user_id, time_str)
+    )
+    db_conn.commit()
     
     embed = discord.Embed(
         title="🟢 운영진 출근 로그",
@@ -125,31 +155,35 @@ async def slash_clock_in(interaction: discord.Interaction):
     )
     embed.add_field(name="출근 시각", value=f"`{time_str}`", inline=False)
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
-    embed.set_footer(text="VIP 서버 운영팀 근태 기록")
+    embed.set_footer(text="VIP 서버 운영팀 영구 근태 기록")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="자리비움", description="근무 중 잠시 자리를 비울 때 기록합니다. (관리자 전용)")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def slash_away(interaction: discord.Interaction, reason: str = "개인 용무"):
     user_id = interaction.user.id
-    now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+    now_str = datetime.datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
     
-    if user_id not in work_records:
+    db_cursor.execute("SELECT start_time, away_start FROM work_records WHERE user_id = ?", (user_id,))
+    row = db_cursor.fetchone()
+    
+    if not row:
         await interaction.response.send_message("❌ 먼저 `/출근`을 한 상태에서만 자리비움을 사용할 수 있습니다.", ephemeral=True)
         return
         
-    if work_records[user_id]["away_start"] is not None:
+    if row[1] is not None:
         await interaction.response.send_message("⚠️ 이미 자리비움 상태입니다! 돌아오셨다면 `/복귀`를 눌러주세요.", ephemeral=True)
         return
         
-    work_records[user_id]["away_start"] = now
+    db_cursor.execute("UPDATE work_records SET away_start = ? WHERE user_id = ?", (now_str, user_id))
+    db_conn.commit()
     
     embed = discord.Embed(
         title="🟡 운영진 자리비움 로그",
         description=f"**{interaction.user.mention}**님이 잠시 자리를 비웠습니다.",
         color=0xF1C40F
     )
-    embed.add_field(name="자리비움 시각", value=f"`{now.strftime('%H:%M:%S')}`", inline=True)
+    embed.add_field(name="자리비움 시각", value=f"`{now_str}`", inline=True)
     embed.add_field(name="사유", value=reason, inline=True)
     embed.set_footer(text="복귀 시 /복귀 명령어를 입력해 주세요.")
     await interaction.response.send_message(embed=embed)
@@ -160,14 +194,19 @@ async def slash_back(interaction: discord.Interaction):
     user_id = interaction.user.id
     now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
     
-    if user_id not in work_records or work_records[user_id]["away_start"] is None:
+    db_cursor.execute("SELECT start_time, away_start, total_away_seconds FROM work_records WHERE user_id = ?", (user_id,))
+    row = db_cursor.fetchone()
+    
+    if not row or row[1] is None:
         await interaction.response.send_message("❌ 현재 자리비움 상태가 아닙니다.", ephemeral=True)
         return
         
-    away_start = work_records[user_id]["away_start"]
-    away_duration = int((now - away_start).total_seconds())
-    work_records[user_id]["total_away_seconds"] += away_duration
-    work_records[user_id]["away_start"] = None
+    away_start_dt = datetime.datetime.strptime(row[1], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("Asia/Seoul"))
+    away_duration = int((now - away_start_dt).total_seconds())
+    new_total_away = row[2] + away_duration
+    
+    db_cursor.execute("UPDATE work_records SET away_start = NULL, total_away_seconds = ? WHERE user_id = ?", (new_total_away, user_id))
+    db_conn.commit()
     
     embed = discord.Embed(
         title="🔵 운영진 업무 복귀 로그",
@@ -185,29 +224,35 @@ async def slash_clock_out(interaction: discord.Interaction):
     user_id = interaction.user.id
     now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
     
-    if user_id not in work_records:
+    db_cursor.execute("SELECT start_time, away_start, total_away_seconds FROM work_records WHERE user_id = ?", (user_id,))
+    row = db_cursor.fetchone()
+    
+    if not row:
         await interaction.response.send_message(
             f"❌ **{interaction.user.display_name}**님의 출근 기록이 없습니다! 먼저 `/출근`을 눌러주세요.",
             ephemeral=True
         )
         return
 
-    record = work_records.pop(user_id)
-    start_time = record["start"]
-    total_away = record["total_away_seconds"]
+    start_dt = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("Asia/Seoul"))
+    total_away = row[2]
     
-    if record["away_start"] is not None:
-        total_away += int((now - record["away_start"]).total_seconds())
+    if row[1] is not None:
+        away_start_dt = datetime.datetime.strptime(row[1], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("Asia/Seoul"))
+        total_away += int((now - away_start_dt).total_seconds())
         
-    total_elapsed = int((now - start_time).total_seconds())
+    total_elapsed = int((now - start_dt).total_seconds())
     actual_work = max(0, total_elapsed - total_away)
+    
+    db_cursor.execute("DELETE FROM work_records WHERE user_id = ?", (user_id,))
+    db_conn.commit()
     
     embed = discord.Embed(
         title="🔴 운영진 퇴근 로그",
         description=f"**{interaction.user.mention}**님이 업무를 종료했습니다. 수고하셨습니다!",
         color=0xE74C3C
     )
-    embed.add_field(name="출근 시각", value=f"`{start_time.strftime('%H:%M:%S')}`", inline=True)
+    embed.add_field(name="출근 시각", value=f"`{start_dt.strftime('%H:%M:%S')}`", inline=True)
     embed.add_field(name="퇴근 시각", value=f"`{now.strftime('%H:%M:%S')}`", inline=True)
     embed.add_field(name="자리비움 합계", value=f"`{format_duration(total_away)}`", inline=True)
     embed.add_field(name="실제 순수 근무 시간", value=f"**{format_duration(actual_work)}**", inline=False)
@@ -215,7 +260,50 @@ async def slash_clock_out(interaction: discord.Interaction):
     embed.set_footer(text="VIP 서버 운영팀 근태 기록")
     await interaction.response.send_message(embed=embed)
 
-# ----------------- 🛡️ 2. 서버 관리 필수 기능 (관리자 전용) -----------------
+@bot.tree.command(name="근무자목록", description="현재 출근 중인 운영진 목록과 근무 상태를 확인합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_working_list(interaction: discord.Interaction):
+    db_cursor.execute("SELECT user_id, start_time, away_start, total_away_seconds FROM work_records")
+    rows = db_cursor.fetchall()
+    
+    if not rows:
+        await interaction.response.send_message("💤 현재 출근 중인 운영진이 없습니다.", ephemeral=True)
+        return
+        
+    now = datetime.datetime.now(ZoneInfo("Asia/Seoul"))
+    embed = discord.Embed(
+        title="📋 현재 출근 중인 운영진 현황",
+        description=f"총 **{len(rows)}명**의 운영진이 출근 상태입니다.",
+        color=0x3498DB
+    )
+    
+    for user_id, start_str, away_str, total_away in rows:
+        member = interaction.guild.get_member(user_id)
+        name = member.display_name if member else f"알 수 없는 운영진 ({user_id})"
+        
+        start_dt = datetime.datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("Asia/Seoul"))
+        current_away = total_away
+        
+        if away_str is not None:
+            away_dt = datetime.datetime.strptime(away_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("Asia/Seoul"))
+            current_away += int((now - away_dt).total_seconds())
+            status_text = "🟡 자리비움 중"
+        else:
+            status_text = "🟢 근무 중"
+            
+        elapsed = int((now - start_dt).total_seconds())
+        actual_work = max(0, elapsed - current_away)
+        
+        embed.add_field(
+            name=f"{name} ({status_text})",
+            value=f"• 출근 시각: `{start_dt.strftime('%H:%M:%S')}`\n• 순수 근무: **{format_duration(actual_work)}**",
+            inline=False
+        )
+        
+    embed.set_footer(text=f"조회 시각: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    await interaction.response.send_message(embed=embed)
+
+# ----------------- 🛡️ 2. 서버 관리 & 상세 로그 연동 경고 시스템 -----------------
 
 @bot.tree.command(name="공지", description="지정한 채널에 깔끔한 공식 공지사항을 올립니다. (관리자 전용)")
 @app_commands.checks.has_permissions(manage_messages=True)
@@ -229,57 +317,304 @@ async def slash_announce(interaction: discord.Interaction, channel: discord.Text
     await channel.send(embed=embed)
     await interaction.response.send_message(f"✅ {channel.mention} 채널에 공지사항을 등록했습니다!", ephemeral=True)
 
-@bot.tree.command(name="경고", description="규칙 위반 유저에게 누적 경고를 부여합니다. (관리자 전용)")
+@bot.tree.command(name="경고", description="유저에게 사유와 담당 운영진, 날짜가 포함된 영구 경고를 부여합니다. (관리자 전용)")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def slash_warn(interaction: discord.Interaction, member: discord.Member, reason: str):
     user_id = member.id
-    user_warnings[user_id] = user_warnings.get(user_id, 0) + 1
-    count = user_warnings[user_id]
+    mod_name = interaction.user.display_name
+    now_str = datetime.datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+    
+    # 1. 누적 횟수 업데이트
+    db_cursor.execute("SELECT warning_count FROM warnings WHERE user_id = ?", (user_id,))
+    row = db_cursor.fetchone()
+    current_count = row[0] if row else 0
+    new_count = current_count + 1
+    
+    if row:
+        db_cursor.execute("UPDATE warnings SET warning_count = ? WHERE user_id = ?", (new_count, user_id))
+    else:
+        db_cursor.execute("INSERT INTO warnings (user_id, warning_count) VALUES (?, ?)", (user_id, new_count))
+        
+    # 2. 상세 로그 기록 테이블에 추가
+    db_cursor.execute(
+        "INSERT INTO warning_logs (user_id, moderator_name, reason, timestamp) VALUES (?, ?, ?, ?)",
+        (user_id, mod_name, reason, now_str)
+    )
+    db_conn.commit()
     
     embed = discord.Embed(
-        title="⚠️ VIP 서버 경고 안내",
+        title="⚠️ VIP 서버 경고 부여 안내",
         description=f"{member.mention}님에게 경고가 부여되었습니다.",
         color=0xFFA500
     )
-    embed.add_field(name="사유", value=reason, inline=True)
-    embed.add_field(name="누적 경고", value=f"**{count}회** / 3회", inline=True)
+    embed.add_field(name="위반 사유", value=reason, inline=False)
+    embed.add_field(name="누적 경고", value=f"**{new_count}회** / 3회", inline=True)
+    embed.add_field(name="담당 운영진", value=mod_name, inline=True)
+    embed.add_field(name="부과 일시", value=f"`{now_str}`", inline=False)
     
-    if count >= 3:
-        embed.add_field(name="🚨 3회 누적 안내", value="경고가 3회 누적되었습니다. 추가 제재(`/타임아웃` 또는 `/제재`)를 검토해 주세요.", inline=False)
+    if new_count >= 3:
+        embed.add_field(name="🚨 3회 누적 안내", value="경고가 3회 이상 누적되었습니다! `/타임아웃` 또는 `/제재` 조치를 고려해 주세요.", inline=False)
         
+    embed.set_footer(text="VIP 서버 운영팀 경고 관리 시스템")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="경고확인", description="특정 유저의 누적 경고 횟수를 조회합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_check_warn(interaction: discord.Interaction, member: discord.Member):
+    db_cursor.execute("SELECT warning_count FROM warnings WHERE user_id = ?", (member.id,))
+    row = db_cursor.fetchone()
+    count = row[0] if row else 0
+    
+    await interaction.response.send_message(f"👤 **{member.display_name}**님의 누적 경고 횟수는 총 **{count}회** 입니다. (상세 내역은 `/경고내역`으로 확인)", ephemeral=True)
+
+@bot.tree.command(name="경고내역", description="유저의 상세 경고 이력(사유, 담당자, 날짜)을 조회합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_warn_history(interaction: discord.Interaction, member: discord.Member):
+    db_cursor.execute("SELECT moderator_name, reason, timestamp FROM warning_logs WHERE user_id = ? ORDER BY log_id DESC", (member.id,))
+    rows = db_cursor.fetchall()
+    
+    db_cursor.execute("SELECT warning_count FROM warnings WHERE user_id = ?", (member.id,))
+    w_row = db_cursor.fetchone()
+    total_count = w_row[0] if w_row else 0
+
+    if not rows:
+        await interaction.response.send_message(f"✨ **{member.display_name}**님의 누적 경고 상세 이력이 없습니다!", ephemeral=True)
+        return
+        
+    embed = discord.Embed(
+        title=f"📜 {member.display_name}님의 경고 상세 이력",
+        description=f"현재 총 누적 경고: **{total_count}회**",
+        color=0xE67E22
+    )
+    
+    for idx, (mod, reason, time_str) in enumerate(rows[:10], start=1): # 최근 10개까지 표시
+        embed.add_field(
+            name=f"#{idx} | 일시: {time_str}",
+            value=f"• **사유:** {reason}\n• **담당 운영진:** {mod}",
+            inline=False
+        )
+        
+    if len(rows) > 10:
+        embed.set_footer(text=f"최근 10건만 표시됨 (전체 이력: {len(rows)}건)")
+    else:
+        embed.set_footer(text="VIP 서버 운영팀 경고 관리 장부")
+        
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="경고목록", description="현재 경고를 1회 이상 받은 전체 멤버 목록을 확인합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_warn_list(interaction: discord.Interaction):
+    db_cursor.execute("SELECT user_id, warning_count FROM warnings WHERE warning_count > 0 ORDER BY warning_count DESC")
+    rows = db_cursor.fetchall()
+    
+    if not rows:
+        await interaction.response.send_message("✨ 현재 경고를 받은 멤버가 단 한 명도 없습니다!", ephemeral=True)
+        return
+        
+    embed = discord.Embed(
+        title="📋 VIP 서버 누적 경고 보유자 목록",
+        description=f"현재 경고를 1회 이상 받은 인원은 총 **{len(rows)}명**입니다.",
+        color=0xFFA500
+    )
+    
+    lines = []
+    for idx, (user_id, count) in enumerate(rows, start=1):
+        member = interaction.guild.get_member(user_id)
+        user_display = f"{member.mention} (`{member.display_name}`)" if member else f"서버 탈퇴 유저 (`ID: {user_id}`)"
+        alert = " 🚨" if count >= 3 else ""
+        lines.append(f"**{idx}.** {user_display} — **{count}회**{alert}")
+        
+    list_text = "\n".join(lines[:30])
+    embed.add_field(name="경고 누적 현황 (높은 순)", value=list_text, inline=False)
+    if len(rows) > 30:
+        embed.set_footer(text=f"상위 30명까지 표시됨 (전체 {len(rows)}명)")
+    else:
+        embed.set_footer(text="VIP 서버 운영팀 경고 관리 장부")
+        
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="경고차감", description="유저의 누적 경고를 지정한 횟수만큼 차감합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_reduce_warn(interaction: discord.Interaction, member: discord.Member, amount: int = 1, reason: str = "운영진 판단에 의한 차감"):
+    if amount < 1:
+        await interaction.response.send_message("❌ 차감할 횟수는 1 이상 입력해 주세요.", ephemeral=True)
+        return
+
+    db_cursor.execute("SELECT warning_count FROM warnings WHERE user_id = ?", (member.id,))
+    row = db_cursor.fetchone()
+    current_count = row[0] if row else 0
+
+    if current_count == 0:
+        await interaction.response.send_message(f"ℹ️ **{member.display_name}**님은 현재 누적 경고가 0회입니다.", ephemeral=True)
+        return
+
+    new_count = max(0, current_count - amount)
+    if new_count == 0:
+        db_cursor.execute("DELETE FROM warnings WHERE user_id = ?", (member.id,))
+    else:
+        db_cursor.execute("UPDATE warnings SET warning_count = ? WHERE user_id = ?", (new_count, member.id))
+    db_conn.commit()
+
+    embed = discord.Embed(
+        title="🔽 VIP 서버 경고 차감 안내",
+        description=f"{member.mention}님의 경고가 **{amount}회** 차감되었습니다.",
+        color=0x2ECC71
+    )
+    embed.add_field(name="사유", value=reason, inline=True)
+    embed.add_field(name="현재 누적 경고", value=f"**{new_count}회** (기존 {current_count}회)", inline=True)
     embed.set_footer(text=f"담당 운영진: {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="타임아웃", description="유저를 지정한 시간(분) 동안 채팅 금지 처리합니다. (관리자 전용)")
+@bot.tree.command(name="경고초기화", description="유저의 누적 경고와 상세 이력을 0회로 완전히 초기화합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def slash_reset_warn(interaction: discord.Interaction, member: discord.Member, reason: str = "경고 기록 초기화"):
+    db_cursor.execute("SELECT warning_count FROM warnings WHERE user_id = ?", (member.id,))
+    row = db_cursor.fetchone()
+    prev_count = row[0] if row else 0
+
+    db_cursor.execute("DELETE FROM warnings WHERE user_id = ?", (member.id,))
+    db_cursor.execute("DELETE FROM warning_logs WHERE user_id = ?", (member.id,))
+    db_conn.commit()
+
+    embed = discord.Embed(
+        title="🔄 VIP 서버 경고 초기화 안내",
+        description=f"{member.mention}님의 누적 경고 및 상세 이력 기록이 모두 초기화되었습니다.",
+        color=0x3498DB
+    )
+    embed.add_field(name="사유", value=reason, inline=True)
+    embed.add_field(name="초기화 전 경고", value=f"{prev_count}회", inline=True)
+    embed.set_footer(text=f"담당 운영진: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="타임아웃", description="유저를 지정한 시간(분) 동안 실제 채팅 금지 처리합니다. (관리자 전용)")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def slash_timeout(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str):
     if minutes < 1 or minutes > 10080:
         await interaction.response.send_message("❌ 1분에서 최대 10080분(7일) 사이로 입력해 주세요.", ephemeral=True)
         return
         
-    duration = datetime.timedelta(minutes=minutes)
-    await member.timeout(duration, reason=reason)
-    
+    try:
+        duration = datetime.timedelta(minutes=minutes)
+        await member.timeout(duration, reason=reason)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ 권한이 부족하여 해당 관리자나 서버 주인을 타임아웃할 수 없습니다.", ephemeral=True)
+        return
+
     embed = discord.Embed(
-        title="🔇 타임아웃(채팅 금지) 조치",
-        description=f"{member.mention}님이 **{minutes}분** 동안 타임아웃 처리되었습니다.",
+        title="🔇 타임아웃(채팅 금지) 조치 완료",
+        description=f"{member.mention}님이 실제로 **{minutes}분** 동안 타임아웃 처리되었습니다.",
         color=0xE74C3C
     )
     embed.add_field(name="사유", value=reason, inline=False)
     embed.set_footer(text=f"처리 관리자: {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="제재", description="규칙을 위반한 유저에 대한 제재 기록을 남깁니다. (관리자 전용)")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def slash_sanction(interaction: discord.Interaction, member: discord.Member, reason: str):
+@bot.tree.command(name="제재", description="유저를 서버에서 실제로 강퇴하거나 차단합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(ban_members=True)
+async def slash_sanction(interaction: discord.Interaction, member: discord.Member, action: str, reason: str):
+    action_lower = action.lower()
+    if action_lower not in ["강퇴", "추방", "차단", "ban", "kick"]:
+        await interaction.response.send_message("❌ 올바른 제재 방식을 입력해 주세요 (예: `강퇴` 또는 `차단`)", ephemeral=True)
+        return
+        
+    if member.guild_permissions.administrator or member == interaction.guild.owner:
+        await interaction.response.send_message("❌ 관리자 권한을 가진 멤버나 서버 주인은 제재할 수 없습니다!", ephemeral=True)
+        return
+
+    try:
+        embed = discord.Embed(
+            title="🚨 VIP 서버 실제 제재 조치",
+            color=0xFF0000
+        )
+        embed.add_field(name="대상 유저", value=member.mention, inline=True)
+        embed.add_field(name="조치 내용", value=action, inline=True)
+        embed.add_field(name="사유", value=reason, inline=False)
+        embed.set_footer(text=f"처리 관리자: {interaction.user.name}")
+
+        if action_lower in ["강퇴", "추방", "kick"]:
+            await member.kick(reason=reason)
+            embed.description = f"{member.mention}님이 서버에서 정상적으로 **추방(강퇴)** 되었습니다."
+        else:
+            await member.ban(reason=reason)
+            embed.description = f"{member.mention}님이 서버에서 실제로 **차단(Ban)** 되었습니다."
+
+        await interaction.response.send_message(embed=embed)
+        
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ 봇의 권한이 대상 멤버보다 낮거나 디스코드 보안 정책으로 인해 제재할 수 없습니다.", ephemeral=True)
+
+@bot.tree.command(name="제재차감", description="타임아웃을 해제하거나 차단(Ban)된 유저 ID의 차단을 풀어줍니다. (관리자 전용)")
+@app_commands.checks.has_permissions(ban_members=True)
+async def slash_reduce_sanction(interaction: discord.Interaction, user_id: str, action: str, reason: str = "제재 완화 조치"):
+    if not user_id.isdigit():
+        await interaction.response.send_message("❌ 올바른 유저 ID 숫자(예: `123456789012345678`)를 입력해 주세요.", ephemeral=True)
+        return
+
+    target_id = int(user_id)
+    action_lower = action.lower()
+
+    if action_lower in ["타임아웃해제", "타임아웃", "timeout"]:
+        member = interaction.guild.get_member(target_id)
+        if not member:
+            await interaction.response.send_message("❌ 현재 서버에 있는 멤버가 아닙니다.", ephemeral=True)
+            return
+        try:
+            await member.timeout(None, reason=reason)
+            embed = discord.Embed(
+                title="🔓 타임아웃 해제 완료",
+                description=f"{member.mention}님의 타임아웃(채팅 금지)이 해제되었습니다.",
+                color=0x2ECC71
+            )
+            embed.add_field(name="사유", value=reason, inline=False)
+            embed.set_footer(text=f"처리 관리자: {interaction.user.display_name}")
+            await interaction.response.send_message(embed=embed)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ 권한이 부족하여 타임아웃을 해제할 수 없습니다.", ephemeral=True)
+
+    elif action_lower in ["차단해제", "밴해제", "unban", "ban"]:
+        try:
+            user_obj = discord.Object(id=target_id)
+            await interaction.guild.unban(user_obj, reason=reason)
+            embed = discord.Embed(
+                title="🕊️ 서버 차단(Ban) 해제 완료",
+                description=f"유저 ID `{target_id}`의 서버 차단이 해제되었습니다. 이제 다시 서버에 들어올 수 있습니다.",
+                color=0x2ECC71
+            )
+            embed.add_field(name="사유", value=reason, inline=False)
+            embed.set_footer(text=f"처리 관리자: {interaction.user.display_name}")
+            await interaction.response.send_message(embed=embed)
+        except discord.NotFound:
+            await interaction.response.send_message("❌ 해당 유저 ID는 현재 차단 목록에 없습니다.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ 봇에게 차단 해제 권한이 부족합니다.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ 해제 방식을 `타임아웃해제` 또는 `차단해제` 중 하나로 입력해 주세요.", ephemeral=True)
+
+@bot.tree.command(name="제재초기화", description="유저의 누적 경고, 상세 이력, 타임아웃 제재를 모두 초기화합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(ban_members=True)
+async def slash_reset_sanction(interaction: discord.Interaction, member: discord.Member, reason: str = "전체 제재 및 경고 초기화"):
+    db_cursor.execute("DELETE FROM warnings WHERE user_id = ?", (member.id,))
+    db_cursor.execute("DELETE FROM warning_logs WHERE user_id = ?", (member.id,))
+    db_conn.commit()
+
+    timeout_status = "해제 완료"
+    try:
+        if member.is_timed_out():
+            await member.timeout(None, reason=reason)
+        else:
+            timeout_status = "해당 없음"
+    except discord.Forbidden:
+        timeout_status = "권한 부족으로 해제 실패"
+
     embed = discord.Embed(
-        title="🚨 VIP 서버 제재 조치 안내",
-        description="관리자에 의해 제재가 처리되었습니다.",
-        color=0xFF0000
+        title="✨ VIP 서버 제재 및 경고 일괄 초기화",
+        description=f"{member.mention}님의 모든 경고 누적, 상세 이력, 활성 제재가 깨끗하게 초기화되었습니다.",
+        color=0x3498DB
     )
-    embed.add_field(name="대상 유저", value=member.mention, inline=True)
-    embed.add_field(name="제재 사유", value=reason, inline=True)
-    embed.set_footer(text=f"처리 관리자: {interaction.user.name}")
+    embed.add_field(name="누적 경고", value="0회로 초기화", inline=True)
+    embed.add_field(name="타임아웃 상태", value=timeout_status, inline=True)
+    embed.add_field(name="사유", value=reason, inline=False)
+    embed.set_footer(text=f"처리 관리자: {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="청소", description="채팅창의 메시지를 지정한 개수만큼 한 번에 삭제합니다. (관리자 전용)")
@@ -292,13 +627,17 @@ async def slash_clear(interaction: discord.Interaction, amount: int):
     deleted = await interaction.channel.purge(limit=amount)
     await interaction.followup.send(f"🧹 최근 메시지 **{len(deleted)}개**를 깔끔하게 삭제했습니다.", ephemeral=True)
 
-# ----------------- 🔍 3. 있으면 편한 서버/유저 편의 기능 -----------------
+# ----------------- 🔍 3. 서버/유저 편의 기능 -----------------
 
-@bot.tree.command(name="유저정보", description="멤버의 가입일, 계정 생성일, 보유 역할을 확인합니다.")
+@bot.tree.command(name="유저정보", description="멤버의 가입일, 계정 생성일, 누적 경고를 확인합니다.")
 async def slash_userinfo(interaction: discord.Interaction, member: discord.Member = None):
     target = member or interaction.user
     roles = [role.mention for role in target.roles if role.name != "@everyone"]
     roles_str = ", ".join(roles) if roles else "없음"
+    
+    db_cursor.execute("SELECT warning_count FROM warnings WHERE user_id = ?", (target.id,))
+    row = db_cursor.fetchone()
+    warn_count = row[0] if row else 0
     
     embed = discord.Embed(
         title=f"👤 {target.display_name}님의 정보",
@@ -307,7 +646,7 @@ async def slash_userinfo(interaction: discord.Interaction, member: discord.Membe
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="디스코드 계정 생성일", value=target.created_at.strftime("%Y-%m-%d"), inline=True)
     embed.add_field(name="서버 가입일", value=target.joined_at.strftime("%Y-%m-%d") if target.joined_at else "알 수 없음", inline=True)
-    embed.add_field(name="누적 경고", value=f"{user_warnings.get(target.id, 0)}회", inline=True)
+    embed.add_field(name="누적 경고", value=f"{warn_count}회", inline=True)
     embed.add_field(name=f"보유 역할 ({len(roles)}개)", value=roles_str, inline=False)
     await interaction.response.send_message(embed=embed)
 
@@ -345,7 +684,7 @@ async def slash_say(interaction: discord.Interaction, message: str):
     embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
-# ----------------- 🎵 4. 빅뱅 팬덤 & 미니게임 기능 -----------------
+# ----------------- 🎵 4. 빅뱅 팬덤 & 미니게임 기능 (동시성 안전 보완) -----------------
 
 @bot.tree.command(name="오늘의추천", description="오늘의 빅뱅 추천곡을 수동으로 뽑습니다!")
 async def slash_recommend_song(interaction: discord.Interaction):
@@ -471,18 +810,26 @@ async def slash_dice(interaction: discord.Interaction):
 # 관리자 전용 명령어 권한 에러 통합 처리
 @slash_announce.error
 @slash_warn.error
+@slash_check_warn.error
+@slash_warn_list.error
+@slash_warn_history.error
+@slash_reduce_warn.error
+@slash_reset_warn.error
 @slash_timeout.error
 @slash_sanction.error
+@slash_reduce_sanction.error
+@slash_reset_sanction.error
 @slash_clear.error
 @slash_clock_in.error
 @slash_clock_out.error
 @slash_away.error
 @slash_back.error
+@slash_working_list.error
 async def admin_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("❌ 이 명령어는 운영진 권한이 있는 관리자만 사용할 수 있습니다.", ephemeral=True)
 
-# ----------------- ⏰ 하루 2번(오전 8시, 오후 3시) 자동 추천 태스크 -----------------
+# ----------------- ⏰ 하루 2번(오전 8시, 오후 3시) 자동 추천 태스크 (동시성 보완) -----------------
 
 @tasks.loop(time=[
     datetime.time(hour=8, minute=0, tzinfo=ZoneInfo("Asia/Seoul")),
